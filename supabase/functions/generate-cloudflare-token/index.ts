@@ -1,7 +1,8 @@
 /// <reference path="./types.d.ts" />
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-Deno.serve(async (req)=>{
+
+Deno.serve(async (req: Request): Promise<Response> => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', {
       headers: {
@@ -10,10 +11,15 @@ Deno.serve(async (req)=>{
       }
     });
   }
+  
   try {
+    // Get environment variables
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+    const CF_MASTER_TOKEN = Deno.env.get('CF_MASTER_TOKEN');
+    const CF_ACCOUNT_ID = Deno.env.get('CF_ACCOUNT_ID');
     
+    // Check required environment variables
     if (!supabaseUrl || !supabaseAnonKey) {
       return new Response(JSON.stringify({
         error: 'Server configuration error'
@@ -22,6 +28,11 @@ Deno.serve(async (req)=>{
       });
     }
     
+    if (!CF_MASTER_TOKEN || !CF_ACCOUNT_ID) {
+      return new Response(JSON.stringify({ error: 'Server misconfiguration' }), { status: 500 });
+    }
+    
+    // Authenticate user with Supabase
     const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: {
@@ -29,8 +40,10 @@ Deno.serve(async (req)=>{
         }
       }
     });
+    
     const token = req.headers.get('Authorization')?.replace('Bearer ', '');
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token);
+    
     if (userError || !user) {
       return new Response(JSON.stringify({
         error: 'User not authenticated'
@@ -38,37 +51,29 @@ Deno.serve(async (req)=>{
         status: 401
       });
     }
-    // Generate Cloudflare AI Gateway token via Cloudflare API
-    const CF_MASTER_TOKEN = Deno.env.get('CF_MASTER_TOKEN');
-    if (!CF_MASTER_TOKEN) {
-      console.error('CF_MASTER_TOKEN not set');
-      return new Response(JSON.stringify({ error: 'Server misconfiguration' }), { status: 500 });
-    }
+    
+    // Generate a user-scoped Cloudflare API token for AI Gateway
+    const CLOUDFLARE_API_URL = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/api/tokens`;
 
-    // Cloudflare API endpoint for token creation (replace with actual endpoint if needed)
-    const CLOUDFLARE_API_URL = "https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/access/service_tokens"; // Placeholder, update as needed
+    // Set expiry for 1 hour from now
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-    // Prepare token request body
-    const now = Math.floor(Date.now() / 1000);
-    const oneHour = 60 * 60;
-    const expiresAt = now + oneHour;
-
+    // Build the request body for a generic account-scoped token (no explicit permission_groups)
     const tokenRequestBody = {
-      name: `ai-gateway-${user.id}-${now}`,
-      expires_on: new Date(expiresAt * 1000).toISOString(),
+      name: `ai-gateway-${user.id}-${Date.now()}`,
       policies: [
         {
-          permission_groups: ["ai.gateway.run"],
-          // Restrict to your gateway/resource as needed
+          effect: "allow",
+          resources: {
+            [`com.cloudflare.api.account.${CF_ACCOUNT_ID}`]: "*"
+          }
         }
       ],
+      expires_on: expiresAt,
       metadata: {
         user_id: user.id
       }
     };
-
-    let cloudflareToken: string | null = null;
-    let cfError: string | null = null;
 
     try {
       const cfResp = await fetch(CLOUDFLARE_API_URL, {
@@ -79,33 +84,38 @@ Deno.serve(async (req)=>{
         },
         body: JSON.stringify(tokenRequestBody)
       });
+      
       const cfData = await cfResp.json();
+      
       if (!cfResp.ok || !cfData.result?.value) {
-        cfError = cfData.errors ? JSON.stringify(cfData.errors) : "Unknown error";
-        throw new Error(cfError);
+        const cfError = cfData.errors ? JSON.stringify(cfData.errors) : "Unknown error";
+        console.error("Cloudflare API error:", cfError);
+        return new Response(JSON.stringify({ error: "Cloudflare token generation failed" }), { status: 502 });
       }
-      cloudflareToken = cfData.result.value;
+
+      return new Response(JSON.stringify({
+        cloudflareToken: cfData.result.value
+      }), {
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        status: 200
+      });
+      
     } catch (err) {
       console.error("Cloudflare token generation failed:", err);
       return new Response(JSON.stringify({ error: "Cloudflare token generation failed" }), { status: 502 });
     }
 
-    return new Response(JSON.stringify({
-      cloudflareToken
-    }), {
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      status: 200
-    });
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     return new Response(JSON.stringify({
-      error: error.message
+      error: errorMessage
     }), {
       headers: {
         'Content-Type': 'application/json'
       },
-      status: 400
+      status: 500
     });
   }
 });

@@ -1,9 +1,7 @@
-// Type declarations for Deno environment in Supabase Edge Functions
-declare namespace Deno {
-  export namespace env {
-    export function get(key: string): string | undefined;
-  }
-  export function serve(handler: (request: Request) => Response | Promise<Response>): void;
+// Type declarations for Supabase Edge Functions
+
+declare module "supabase" {
+  export function createClient(url: string, key: string, options?: any): any;
 }
 
 declare module "jsr:@supabase/supabase-js@2" {
@@ -12,4 +10,9 @@ declare module "jsr:@supabase/supabase-js@2" {
 
 declare module "jsr:@supabase/functions-js/edge-runtime.d.ts" {
   // This module provides runtime type definitions
+}
+
+// Extend ImportMeta for Deno's specific properties
+interface ImportMeta {
+  main: boolean;
 }
